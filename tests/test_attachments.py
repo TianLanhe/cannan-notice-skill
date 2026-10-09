@@ -1,5 +1,6 @@
 import importlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,26 @@ class AttachmentTests(unittest.TestCase):
     def setUp(self):
         try:self.m=importlib.import_module('cannan_cli.attachments')
         except ModuleNotFoundError:self.fail('attachment collection not implemented')
+
+    def test_first_download_output_is_private_without_chmod_existing_directories(self):
+        detail = {'notice_id': 1, 'title': 'Example', 'attachment_list': [
+            {'url': 'https://apps.cannan.edu.hk/a.pdf'}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            parent.chmod(0o755)
+            output = parent / 'new-output'
+            previous_umask = os.umask(0o022)
+            try:
+                item = self.m.collect_attachments(FakeTransport(), detail, output)[0]
+                self.assertEqual(item['status'], 'ok')
+                self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(Path(item['local_path']).parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(parent.stat().st_mode & 0o777, 0o755)
+                output.chmod(0o755)
+                self.m.collect_attachments(FakeTransport(), detail, output)
+                self.assertEqual(output.stat().st_mode & 0o777, 0o755)
+            finally:
+                os.umask(previous_umask)
 
     def test_pdf_text_and_safe_file_names(self):
         d={'notice_id':1,'attachment_list':[{'title':'../../outside.pdf','url':'https://apps.cannan.edu.hk/中文 a.pdf','notice_attachment_id':3}]}

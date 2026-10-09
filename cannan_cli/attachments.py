@@ -57,6 +57,7 @@ def collect_attachments(transport, detail: dict, directory: Path):
     if not isinstance(attachments, list):
         raise ClientError('附件列表格式不正确。')
     folder = notice_folder(detail, directory)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     results = []
     pdf_ordinal = 0
