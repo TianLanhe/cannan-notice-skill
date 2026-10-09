@@ -228,3 +228,17 @@ class CliTests(unittest.TestCase):
         self.assertFalse(data['complete'])
         self.assertEqual(len(data['errors']), 1)
         self.assertTrue(Path(data['attachments'][0]['local_path']).exists())
+
+    def test_render_without_profile_or_network(self):
+        path = Path(self.temp.name) / 'scan.pdf'
+        path.write_bytes(pdf_bytes())
+        self.profile.unlink()
+        out = io.StringIO()
+        with patch.object(self.m, 'CurlTransport', side_effect=AssertionError('render must stay offline')), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                code = self.m.main(['--profile', str(self.profile), 'render', str(path), '--pages', '1'])
+            except SystemExit:
+                self.fail('local render command is not implemented')
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data['rendered_pages'], [1])

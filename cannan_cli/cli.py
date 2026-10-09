@@ -129,6 +129,10 @@ def build_parser():
     download.add_argument('notice_id', type=int)
     download.add_argument('--directory', default=str(default_directory()), help='附件保存目录；默认 ~/Documents/Cannan Notices/')
     download.add_argument('--output', help='JSON 保存路径；默认通知目录/notice.json')
+    render = subs.add_parser('render', help='离线将本地 PDF 渲染为页面图片，无需登录')
+    render.add_argument('local_pdf')
+    render.add_argument('--pages', help='从 1 开始的页码或范围，例如 1,3-5；默认全部页')
+    render.add_argument('--directory', help='页面图片目录；默认 PDF 同级/<文件名>-pages/')
     return parser
 
 
@@ -218,6 +222,11 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     path = Path(getattr(args, 'profile', default_profile())).expanduser()
     try:
+        if args.command == 'render':
+            from .rendering import render_pdf
+            result = render_pdf(Path(args.local_pdf), Path(args.directory) if args.directory else None, args.pages)
+            emit(result)
+            return 0 if result['complete'] else 2
         if path.exists():
             profile = json.loads(path.read_text())
             if not isinstance(profile, dict):
