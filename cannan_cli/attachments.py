@@ -1,5 +1,6 @@
 """Download only validated attachment hosts; preserve originals and text status."""
 import os
+import logging
 from pathlib import Path
 import re
 import tempfile
@@ -7,6 +8,7 @@ from urllib.parse import urljoin, urlsplit
 
 from .client import ClientError, positive_int
 from .transport import API_HOST, TransportError, safe_url
+from .paths import notice_folder
 
 
 def write_private(path: Path, data: bytes):
@@ -33,6 +35,9 @@ def extract_pdf(path: Path):
         from pypdf import PdfReader
     except ImportError:
         return {'text': '', 'pages': None, 'status': 'dependency_missing'}
+    logger = logging.getLogger('pypdf')
+    previous_disabled = logger.disabled
+    logger.disabled = True
     try:
         reader = PdfReader(str(path))
         page_texts = [page.extract_text() or '' for page in reader.pages]
@@ -41,7 +46,9 @@ def extract_pdf(path: Path):
         status = 'needs_ocr' if not text.strip() else ('partial' if missing else 'ok')
         return {'text': text, 'pages': len(page_texts), 'pages_without_text': missing, 'status': status}
     except Exception:
-        return {'text': '', 'pages': None, 'status': 'error'}
+        return {'text': '', 'pages': None, 'status': 'error', 'error': 'PDF 解析失败，文件可能损坏或需要解密；原件已保留。'}
+    finally:
+        logger.disabled = previous_disabled
 
 
 def collect_attachments(transport, detail: dict, directory: Path):
@@ -49,8 +56,10 @@ def collect_attachments(transport, detail: dict, directory: Path):
     attachments = detail.get('attachment_list') or []
     if not isinstance(attachments, list):
         raise ClientError('附件列表格式不正确。')
-    folder = Path(directory) / f'notice-{identity}'
+    folder = notice_folder(detail, directory)
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     results = []
+    pdf_ordinal = 0
     hosts = set(getattr(transport, 'allowed_hosts', {API_HOST}))
     for index, attachment in enumerate(attachments, 1):
         item = {'index': index, 'status': 'error'}
@@ -61,6 +70,9 @@ def collect_attachments(transport, detail: dict, directory: Path):
         item.update({k: attachment[k] for k in ('title', 'notice_attachment_id', 'url') if k in attachment})
         try:
             url = safe_url(attachment.get('url'), hosts)
+            known_pdf = Path(urlsplit(url).path).suffix.lower() == '.pdf'
+            if known_pdf:
+                pdf_ordinal += 1
             for hop in range(4):
                 response = transport.request('GET', url)
                 if response.status not in (301, 302, 303, 307, 308):
@@ -75,6 +87,8 @@ def collect_attachments(transport, detail: dict, directory: Path):
                 suffix = '.bin'
             is_pdf = suffix == '.pdf' or 'application/pdf' in response.headers.get('content-type', '')
             if is_pdf:
+                if not known_pdf:
+                    pdf_ordinal += 1
                 suffix = '.pdf'
                 if not response.body.startswith(b'%PDF-'):
                     raise TransportError('附件响应不是有效 PDF 文件。')
@@ -82,6 +96,9 @@ def collect_attachments(transport, detail: dict, directory: Path):
             write_private(path, response.body)
             item.update(local_path=str(path), bytes=len(response.body), status='downloaded')
             if is_pdf:
+                collection_path = Path(directory) / 'pdfs' / f'{folder.name}-{pdf_ordinal}.pdf'
+                write_private(collection_path, response.body)
+                item['collection_path'] = str(collection_path)
                 item.update(extract_pdf(path))
                 if item.get('text', '').strip():
                     text_path = path.with_suffix('.txt')
