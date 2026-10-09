@@ -1,0 +1,1 @@
+"""Cannan notices client."""
