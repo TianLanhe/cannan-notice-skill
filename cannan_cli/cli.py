@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from .attachments import collect_attachments, write_private
 from .client import ClientError, CannanClient, normalize_context, parse_statuses, positive_int, sign_in
 from .transport import API_HOST, CurlTransport, TransportError
+from .paths import default_profile, default_directory, notice_folder
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -98,7 +99,7 @@ def context_from_har(path, student_index=None):
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument('--profile', default=argparse.SUPPRESS, help='私有配置路径；默认 .local/profile.json')
+    common.add_argument('--profile', default=argparse.SUPPRESS, help='私有配置路径；默认 ~/.config/cannan-notice/profile.json')
     common.add_argument('--proxy', default=argparse.SUPPRESS, help='显式 HTTP/SOCKS 代理 URL')
     common.add_argument('--ca-bundle', default=argparse.SUPPRESS, help='额外 CA PEM（保留 TLS 校验）')
     common.add_argument('--resolve', action='append', default=argparse.SUPPRESS, metavar='HOST=IP', help='显式临时解析，可重复；不关闭 TLS 校验')
@@ -119,11 +120,15 @@ def build_parser():
         sub.add_argument('--status', action='append', help='unread / unreplied / all；可重复或逗号分隔，默认 all')
         sub.add_argument('--page-size', type=int, default=20)
         sub.add_argument('--output', help='JSON 保存路径；list 默认 stdout，sync 默认目录/index.json')
-    sync.add_argument('--directory', default=str(ROOT / '.local' / 'data'), help='附件保存目录')
+    sync.add_argument('--directory', default=str(default_directory()), help='附件保存目录；默认 ~/Documents/Cannan Notices/')
     sync.add_argument('--limit', type=int, help='仅处理前 N 条，结果明确标为 limited')
     detail = subs.add_parser('detail', parents=[common], help='按 ID 读取详情（更新阅读时间）')
     detail.add_argument('notice_id', type=int)
     detail.add_argument('--output', help='JSON 保存路径；省略时 stdout')
+    download = subs.add_parser('download', parents=[common], help='读取一条通告并下载全部附件（更新阅读时间）')
+    download.add_argument('notice_id', type=int)
+    download.add_argument('--directory', default=str(default_directory()), help='附件保存目录；默认 ~/Documents/Cannan Notices/')
+    download.add_argument('--output', help='JSON 保存路径；默认通知目录/notice.json')
     return parser
 
 
@@ -154,6 +159,34 @@ def emit(data, path=None):
         print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def process_notice(client, transport, notice_id: int, directory: Path) -> dict:
+    detail = client.detail(notice_id)
+    attachments = collect_attachments(transport, detail, directory)
+    texts = [item['text'] for item in attachments if item.get('text')]
+    if detail.get('content'):
+        texts.insert(0, readable_text(detail['content']))
+    text = '\n\n'.join(texts)
+    errors = []
+    text_complete = bool(text.strip())
+    text_status = 'ok' if text_complete else 'no_body'
+    for item in attachments:
+        if item['status'] in ('error', 'dependency_missing'):
+            message = item.get('error') or ('附件 PDF 提取依赖缺失。' if item['status'] == 'dependency_missing' else '附件处理失败。')
+            errors.append({'notice_id': notice_id, 'attachment_index': item['index'], 'error': message})
+        if item['status'] != 'ok':
+            text_complete = False
+            text_status = 'partial' if text.strip() else item['status']
+    return dict(detail=detail, attachments=attachments, extracted_text=text,
+                text_status=text_status, sync_status='error' if errors else 'ok',
+                errors=errors, complete=not errors, text_complete=text_complete)
+
+
+def completion_code(result: dict) -> int:
+    if result['errors']:
+        return 2
+    return 0 if result['complete'] and result['text_complete'] else 3
+
+
 def sync_notices(client, transport, result, directory, limit=None):
     if limit is not None:
         limit = positive_int(limit, 'limit')
@@ -164,24 +197,10 @@ def sync_notices(client, transport, result, directory, limit=None):
         row['sync_status'] = 'not_processed'
     for row in selected:
         try:
-            detail = client.detail(row['notice_id'])
-            attachments = collect_attachments(transport, detail, directory)
-            row.update(detail=detail, attachments=attachments, sync_status='ok')
-            texts = [item.get('text', '') for item in attachments if item.get('text')]
-            if detail.get('content'):
-                texts.insert(0, readable_text(detail['content']))
-            row['extracted_text'] = '\n\n'.join(texts)
-            row['text_status'] = 'ok' if row['extracted_text'].strip() else 'no_body'
-            if not row['extracted_text'].strip():
-                result['text_complete'] = False
-            for item in attachments:
-                if item['status'] in ('error', 'dependency_missing'):
-                    row['sync_status'] = 'error'
-                    result['errors'].append({'notice_id': row['notice_id'], 'attachment_index': item['index'],
-                                             'error': item.get('error', '附件 PDF 提取依赖缺失。')})
-                if item['status'] not in ('ok',):
-                    result['text_complete'] = False
-                    row['text_status'] = 'partial' if row['extracted_text'].strip() else item['status']
+            processed = process_notice(client, transport, row['notice_id'], directory)
+            row.update(processed)
+            result['errors'].extend(processed['errors'])
+            result['text_complete'] = result['text_complete'] and processed['text_complete']
         except (ClientError, TransportError, OSError) as error:
             row['sync_status'] = 'error'
             result['errors'].append({'notice_id': row['notice_id'],
@@ -197,7 +216,7 @@ def sync_notices(client, transport, result, directory, limit=None):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    path = Path(getattr(args, 'profile', ROOT / '.local' / 'profile.json')).expanduser()
+    path = Path(getattr(args, 'profile', default_profile())).expanduser()
     try:
         if path.exists():
             profile = json.loads(path.read_text())
@@ -231,13 +250,18 @@ def main(argv=None):
                       'reading_updates_timestamp': True, 'data': client.detail(args.notice_id)}
             emit(result, args.output)
             return 0
+        if args.command == 'download':
+            directory = Path(args.directory).expanduser().resolve()
+            result = process_notice(client, transport, args.notice_id, directory)
+            result.update(generated_at=datetime.now(timezone.utc).isoformat(), reading_updates_timestamp=True)
+            output = args.output or notice_folder(result['detail'], directory) / 'notice.json'
+            emit(result, output)
+            return completion_code(result)
         result = client.list_notices(parse_statuses(args.status), args.page_size)
         result = sync_notices(client, transport, result, Path(args.directory).expanduser().resolve(), args.limit)
         output = args.output or str(Path(args.directory).expanduser().resolve() / 'index.json')
         emit(result, output)
-        if result['errors']:
-            return 2
-        return 0 if result['complete'] and result['text_complete'] else 3
+        return completion_code(result)
     except (ClientError, TransportError) as error:
         print(str(error), file=sys.stderr)
         return 2

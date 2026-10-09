@@ -36,8 +36,8 @@ def extract_pdf(path: Path):
     except ImportError:
         return {'text': '', 'pages': None, 'status': 'dependency_missing'}
     logger = logging.getLogger('pypdf')
-    previous_disabled = logger.disabled
-    logger.disabled = True
+    previous_level = logger.level
+    logger.setLevel(logging.CRITICAL + 1)
     try:
         reader = PdfReader(str(path))
         page_texts = [page.extract_text() or '' for page in reader.pages]
@@ -48,7 +48,7 @@ def extract_pdf(path: Path):
     except Exception:
         return {'text': '', 'pages': None, 'status': 'error', 'error': 'PDF 解析失败，文件可能损坏或需要解密；原件已保留。'}
     finally:
-        logger.disabled = previous_disabled
+        logger.setLevel(previous_level)
 
 
 def collect_attachments(transport, detail: dict, directory: Path):

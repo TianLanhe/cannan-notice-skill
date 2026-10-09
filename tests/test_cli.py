@@ -24,7 +24,10 @@ class CliTests(unittest.TestCase):
     def run_cli(self,*args,transport=None):
         out,err=io.StringIO(),io.StringIO()
         with patch.object(self.m,'CurlTransport',return_value=transport or FakeTransport()),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
-            code=self.m.main(['--profile',str(self.profile),*args])
+            try:
+                code=self.m.main(['--profile',str(self.profile),*args])
+            except SystemExit:
+                self.fail('requested CLI behavior is not implemented')
         return code,out.getvalue(),err.getvalue()
 
     def test_default_all_is_complete_json(self):
@@ -134,3 +137,94 @@ class CliTests(unittest.TestCase):
         self.assertEqual(item['status'],'needs_ocr')
         self.assertEqual(item['pages_without_text'],[1])
         self.assertTrue(Path(item['local_path']).exists())
+
+    def test_missing_user_profile_does_not_fall_back_to_source(self):
+        source = Path(self.temp.name) / 'source'
+        legacy = source / '.local' / 'profile.json'
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(self.profile.read_text())
+        with patch.dict(os.environ, {'HOME': str(Path(self.temp.name) / 'empty-home')}), patch.object(self.m, 'ROOT', source), patch.object(self.m, 'CurlTransport', return_value=FakeTransport()), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.m.main(['list']), 2)
+
+    def test_default_login_writes_user_profile(self):
+        home = Path(self.temp.name) / 'new-home'
+        with patch.dict(os.environ, {'HOME': str(home), 'CANNAN_PASSWORD': 'synthetic-secret'}), patch.object(self.m, 'ROOT', Path(self.temp.name) / 'source'), patch.object(self.m, 'CurlTransport', return_value=FakeTransport()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.main(['login', '--account', 'synthetic-account']), 0)
+        profile = home / '.config' / 'cannan-notice' / 'profile.json'
+        self.assertTrue(profile.exists())
+        self.assertNotIn('synthetic-secret', profile.read_text())
+
+    def attachment_transport(self, body=None, image=False):
+        class Attachments(FakeTransport):
+            def request(self, method, url, params=None):
+                if url.endswith('/attachment.pdf'):
+                    return HttpResponse(200, {'content-type': 'application/pdf'}, body if body is not None else pdf_bytes())
+                if url.endswith('/attachment.jpg'):
+                    return HttpResponse(200, {'content-type': 'image/jpeg'}, b'image-original')
+                response = super().request(method, url, params)
+                if url.endswith('/getNotice'):
+                    data = json.loads(response.body)
+                    data['data']['attachment_list'] = [{'url': 'https://apps.cannan.edu.hk/attachment.' + ('jpg' if image else 'pdf')}]
+                    response.body = json.dumps(data).encode()
+                return response
+        return Attachments()
+
+    def test_download_single_notice_keeps_batch_index(self):
+        directory = Path(self.temp.name) / 'download'
+        directory.mkdir()
+        (directory / 'index.json').write_text('KEEP')
+        transport = self.attachment_transport()
+        code, _, _ = self.run_cli('download', '1', '--directory', str(directory), transport=transport)
+        self.assertEqual(code, 0)
+        data = json.loads((directory / 'notice-1-Example' / 'notice.json').read_text())
+        self.assertTrue(data['complete'])
+        self.assertTrue(data['text_complete'])
+        self.assertTrue(Path(data['attachments'][0]['collection_path']).exists())
+        self.assertEqual(transport.details, [1])
+        self.assertEqual((directory / 'index.json').read_text(), 'KEEP')
+        code, _, _ = self.run_cli('download', '999', '--directory', str(directory), transport=transport)
+        self.assertEqual(code, 2)
+        self.assertEqual(transport.details, [1])
+
+    def test_download_defaults_to_user_documents(self):
+        home = Path(self.temp.name) / 'download-home'
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            code, _, _ = self.run_cli('download', '1', transport=self.attachment_transport())
+        self.assertEqual(code, 0)
+        self.assertTrue((home / 'Documents' / 'Cannan Notices' / 'notice-1-Example' / 'notice.json').exists())
+
+    def test_download_reports_visual_and_parse_states(self):
+        directory = Path(self.temp.name) / 'states'
+        for transport, expected in ((self.attachment_transport(pdf_bytes(False)), 3), (self.attachment_transport(image=True), 3), (self.attachment_transport(b'%PDF-1.7\ninvalid'), 2)):
+            code, _, _ = self.run_cli('download', '1', '--directory', str(directory), transport=transport)
+            self.assertEqual(code, expected)
+            data = json.loads((directory / 'notice-1-Example' / 'notice.json').read_text())
+            self.assertFalse(data['text_complete'])
+            self.assertTrue(Path(data['attachments'][0]['local_path']).exists())
+            if expected == 2:
+                self.assertIn('解析', data['errors'][0]['error'])
+
+    def test_sync_index_is_current_run_and_keeps_old_downloads(self):
+        directory = Path(self.temp.name) / 'history'
+        transport = self.attachment_transport()
+        self.run_cli('sync', '--status', 'unread', '--directory', str(directory), transport=transport)
+        self.run_cli('sync', '--status', 'unreplied', '--directory', str(directory), transport=transport)
+        data = json.loads((directory / 'index.json').read_text())
+        self.assertEqual([row['notice_id'] for row in data['notices']], [3])
+        self.assertTrue((directory / 'notice-1-Example' / 'attachment-1.pdf').exists())
+
+    def test_download_copy_failure_is_saved_as_error(self):
+        import cannan_cli.attachments as module
+        original_write = module.write_private
+        def fail_copy(path, data):
+            if Path(path).parent.name == 'pdfs':
+                raise OSError('synthetic disk failure')
+            return original_write(path, data)
+        directory = Path(self.temp.name) / 'copy-error'
+        with patch.object(module, 'write_private', side_effect=fail_copy):
+            code, _, _ = self.run_cli('download', '1', '--directory', str(directory), transport=self.attachment_transport())
+        self.assertEqual(code, 2)
+        data = json.loads((directory / 'notice-1-Example' / 'notice.json').read_text())
+        self.assertFalse(data['complete'])
+        self.assertEqual(len(data['errors']), 1)
+        self.assertTrue(Path(data['attachments'][0]['local_path']).exists())

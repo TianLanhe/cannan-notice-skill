@@ -161,3 +161,11 @@ class AttachmentTests(unittest.TestCase):
             self.assertEqual(item['status'], 'ok')
             self.assertTrue(item.get('collection_path'), 'PDF collection must exist')
             self.assertLessEqual(len(Path(item['collection_path']).name.encode()), 255)
+
+    def test_pdf_parser_does_not_log_raw_diagnostics(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'damaged.pdf'
+            path.write_bytes(b'%PDF-1.7\ninvalid')
+            with self.assertNoLogs('pypdf', level='WARNING'):
+                result = self.m.extract_pdf(path)
+            self.assertEqual(result['status'], 'error')
