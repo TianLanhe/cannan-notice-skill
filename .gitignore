@@ -4,3 +4,11 @@ __pycache__/
 *.pyc
 *.har
 *.private.*
+.superpowers/
+profile.json
+index.json
+notice.json
+notice-*/
+pdfs/
+*-pages/
+.DS_Store

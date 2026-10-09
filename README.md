@@ -1,95 +1,78 @@
-# 迦南通告 Python CLI
+# 迦南通知 · Cannan Notice
 
-读取自己账号对应学生的通告列表、详情和附件。支持未查阅、未回复、全部，以及多状态并集查询。列表逐页获取并校验完整性；PDF 附件保留原件，并提取文本层。
+查询自己账号对应学生的迦南幼稚园通知、详情和附件。CLI 支持未查阅、未回复、全部与多状态并集；随附的通用 Agent Skill 支持阅读文本 PDF、扫描件和图片。日常查询无需手机、抓包代理或模拟器。
 
-## 本机直接使用
+[安装与登录](#安装与首次登录) · [常用命令](#常用命令) · [附件与输出](#附件与输出) · [完整参数](references/cli.md) · [实测记录](VERIFICATION.md)
 
-本目录已有 `.venv` 和私有 `.local/profile.json`。进入此目录后运行：
+## 安装与首次登录
 
-```bash
-.venv/bin/python cannan.py list --status unread
-.venv/bin/python cannan.py list --status unreplied
-.venv/bin/python cannan.py list --status all --output .local/all.json
-.venv/bin/python cannan.py list --status unread,unreplied --output .local/pending.json
+需要 macOS、Python 3.10+、curl 和 Git。启动器自动选择符合版本要求的 Python；缺少时会给出指引。若使用 Homebrew，可通过 `brew install python` 安装 Python。
+
+将完整仓库安装为 Codex Skill：
+
+```sh
+git clone https://github.com/TianLanhe/cannan-notice-skill.git \
+  "${CODEX_HOME:-$HOME/.codex}/skills/cannan-notice"
+cd "${CODEX_HOME:-$HOME/.codex}/skills/cannan-notice"
+sh scripts/cannan login
 ```
 
-重复参数同样有效：
+第一次运行会在 `~/Library/Caches/cannan-notice/` 建立独立虚拟环境并安装依赖；之后复用。账号在终端输入，密码隐藏输入且不保存。多个学生时，用 `--student-index N` 明确选择，从 1 开始。不要把密码发送到聊天或写入命令历史。
 
-```bash
-.venv/bin/python cannan.py list --status unread --status unreplied
+下一轮 Codex 对话即可使用 `$cannan-notice`。其他支持 Agent Skills 的工具使用自己的 skills 目录，同样保留完整仓库。只使用 CLI 时，可克隆到普通目录。
+
+默认私有配置为 `~/.config/cannan-notice/profile.json`，下载结果为 `~/Documents/Cannan Notices/`，均独立于源码。`--profile`、`--directory` 可以覆盖路径。旧 `.local/profile.json` 不会被自动读取：可显式指定 `--profile`，或自行迁移到新默认位置并保持文件权限 `0600`。自己的 HAR 也可通过 `import-profile` 导入，见 [参数参考](references/cli.md#import-profile)。
+
+## 常用命令
+
+以下命令在仓库根目录执行；其他目录用启动器绝对路径。
+
+```sh
+sh scripts/cannan list --status unread
+sh scripts/cannan list --status unreplied
+sh scripts/cannan list --status all
+sh scripts/cannan list --status unread,unreplied
+
+# NOTICE_ID 换成列表返回的真实 ID
+sh scripts/cannan detail NOTICE_ID
+sh scripts/cannan download NOTICE_ID
+sh scripts/cannan sync --status unread,unreplied
+sh scripts/cannan render "/absolute/path/to/notice.pdf"
 ```
 
-多个状态分别查询和分页，结果按 `notice_id` 合并去重；`matched_statuses` 保留匹配的状态，`by_status` 提供各状态统计。默认 `all`。同时指定 `all,unread` 也不会重复输出通告。
+CLI 默认状态是 `all`；Skill 在用户没有指定范围时显式查询 `unread,unreplied` 并集。自然语言示例：`使用 $cannan-notice 帮我查阅迦南通知，并完整查看附件。` 只查询列表不会顺带读取详情。附件视觉阅读需要 Agent 的图像读取能力，程序不接入外部 OCR 服务。
 
-详情和批量同步：
+> [!NOTE]
+> `detail`、`download`、`sync` 会更新服务端阅读时间，但不会确认查阅或提交回条。“未查阅”按 App 的状态参数查询，不按阅读时间是否为空推断。
 
-```bash
-# 将 NOTICE_ID 换成 list 返回的真实 notice_id
-.venv/bin/python cannan.py detail NOTICE_ID --output .local/detail.json
+七个命令及全部参数见 [CLI 参考](references/cli.md)。
 
-# 获取未查阅或未回复的详情、附件、PDF 文本
-.venv/bin/python cannan.py sync --status unread,unreplied --directory .local/pending
+## 附件与输出
 
-# 全部通告；不加 --limit 才处理完整集合
-.venv/bin/python cannan.py sync --status all --directory .local/all
-
-# 仅处理第一条，用于验证；limited=true、complete=false
-.venv/bin/python cannan.py sync --status all --limit 1 --directory .local/sample
+```text
+Cannan Notices/
+├── index.json
+├── notice-123-家长会通知/
+│   ├── notice.json           # download 默认保存；sync 不生成此文件
+│   ├── attachment-1.pdf
+│   └── attachment-1.txt
+└── pdfs/
+    └── notice-123-家长会通知-1.pdf
 ```
 
-`detail` 先核验 ID 属于本学生列表。`sync` 不自动回复或确认回条；调用详情接口会更新 `read_date_time`。**App“未查阅”状态不是“阅读时间为空”**：按 App 实际参数 `has_reply_slip=0,is_confirmed=0` 查询，详情读取不会调用确认接口。
+通知目录和 PDF 副本保留中文标题，替换非法路径字符并限制长度；JSON 保留完整标题。原件保留在通知目录，每条通知的 PDF 从 1 编号，图片不占 PDF 序号。`pdfs/` 中是可独立移动和分享的副本。
 
-## 在其他环境安装
+相同路径重跑会覆盖；标题变化或附件减少不会自动删除旧文件。以本次 JSON 的附件路径判断本次范围。文件使用 `0600` 权限，新建的数据目录使用 `0700`。
 
-需要 Python 3.10+ 和 curl。macOS 的系统 `python3` 可能仍是 3.9，创建虚拟环境时使用满足版本要求的 Python：
+`complete` 表示请求范围处理完整且无错误，`text_complete` 单独表示自动文本提取完整。扫描页为 `needs_ocr`，混合 PDF 为 `partial`，图片为 `not_pdf`；可通过 `render` 和 Agent 视觉继续阅读。退出码 `0` 为完整成功，`2` 为错误，`3` 为结果已保存但范围或文本不完整，**不等于下载失败**。`--limit` 也可能导致退出码 3，应查看保存的 JSON。
 
-```bash
-python3.14 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python cannan.py login
-```
+当前查询范围是登录返回学生的当前学年，未宣称覆盖历史所有学年。学校修改接口后可能需要调整客户端。默认验证 TLS；临时解析、可信代理及响应大小等配置见 [网络参数](references/cli.md#公共网络与配置参数)，不要关闭证书校验。
 
-`login` 交互输入账号、密码，密码不会显示或保存；也支持 `--account` 与环境变量 `CANNAN_PASSWORD`。不要把密码写入脚本或命令历史。登录请求使用 `is_delete_user_push_token=0`，避免复制抓包中清理手机推送 token 的设置。独立 login 流程和这个参数的服务器行为尚未实测；本机已导入的 profile 已用于真实列表、详情与附件读取。多学生使用 `--student-index 1`（索引从 1 开始）；未明确选择时不保存配置。
+## 文档与维护
 
-已有自己账号的 HAR 时，可无需密码导入：
+- [SKILL.md](SKILL.md)：Agent 查询与阅读流程。
+- [references/cli.md](references/cli.md)：完整命令、参数和结果字段。
+- [AGENTS.md](AGENTS.md)：修改代码时的维护规则与验证命令。
+- [VERIFICATION.md](VERIFICATION.md)：已验证的范围与限制。
 
-```bash
-.venv/bin/python cannan.py import-profile --har /absolute/path/to/own-capture.har
-```
-
-导入只读取登录响应的学生上下文或已有列表参数，不保存抓包中的密码。配置默认位于本目录 `.local/profile.json`，文件权限 0600。`profile.example.json` 使用空值占位，不含身份数据。
-
-## 网络配置
-
-默认直接联网并验证 TLS。可以在 profile 的 `network` 中配置 `proxy`、`ca_bundle`、`resolve`、`timeout`、`max_bytes`、`allowed_hosts`，或用命令参数覆盖：
-
-```bash
-.venv/bin/python cannan.py list --status all --proxy http://127.0.0.1:9090 --ca-bundle /path/to/proxyman-ca.pem
-# 仅用于你已核实的临时地址；REPLACE_WITH_VERIFIED_IP 不是有效默认值
-.venv/bin/python cannan.py list --resolve apps.cannan.edu.hk=REPLACE_WITH_VERIFIED_IP
-```
-
-本机 DNS 曾返回导致证书错误的地址；本机私有配置暂时使用已核验的域名解析地址，TLS 主机名和证书链仍校验。源码及示例没有写死 CDN IP。临时解析地址未来可能失效，应更新私有配置、使用显式可信代理或修正本机 DNS；**不要关闭证书校验**。
-
-附件默认仅允许 `apps.cannan.edu.hk` 的 HTTPS（443）。如实际详情返回其他附件主机，先核验再加入 `network.allowed_hosts`，列表和详情服务地址仍固定。跳转最多 3 次，外部主机不会被静默访问。单次响应默认最大 20 MiB、超时 25 秒。
-
-## 输出与完整性
-
-- `list`：`requested_statuses`、`by_status`、`notices`、`errors`、`complete`。页码异常、重复页或唯一数与 `total` 不符时失败，避免把第一页当成完整结果。
-- `sync`：在列表字段上增加 `detail`、`attachments`、`extracted_text`、`text_status`、`sync_status`，汇总有 `processed`、`list_complete`、`limited`、`text_complete`。
-- `complete` 表示请求范围已全部处理且无失败；`text_complete` 单独反映正文提取是否完整。扫描 PDF 标记 `needs_ocr`；混合文字页与无文本页的 PDF 标记 `partial`，`pages_without_text` 列出无文本页（从 1 开始），已有文本仍保存。空白页也会保守标记为待检查；保留原件，本版本不调用 OCR。图片附件保留原文件并标为 `not_pdf`；没有正文或附件的条目标记 `no_body`。
-- JSON 默认写入 `目录/index.json`，附件写入 `notice-ID/attachment-N.pdf`，文本写入同名 `.txt`；全部使用 0600 权限。附件标题不会被当成文件路径。
-- `list/detail` 不带 `--output` 时向 stdout 输出 JSON；进度只写 stderr。完整成功退出码 0，输入/请求失败或部分同步失败为 2。同步结果已保存但范围或文本不完整时为 3（扫描页、图片、没有正文或主动 `--limit`）；自动化程序可处理保存的 JSON 后决定是否继续。`--limit` 会设置 `limited=true,complete=false`。
-- 详情请求有阅读时间副作用，不自动重试。失败保留在 JSON 的 `errors`，可决定是否重跑。
-
-当前只核验了登录响应的学生当前学年，不宣称覆盖历史所有学年。接口行为来自原版 App 的抓包及实请求，学校后续修改接口时可能需要调整客户端。
-
-## 测试
-
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-```
-
-离线测试使用合成数据与合成 PDF。真实抓包、账号上下文和下载结果在 `.local/` 或外层 `work/`，不会进入源文件与示例；分享程序时排除 `.local/`、`.venv/` 和 HAR。
-
-本机实测及未验证边界见 [核验记录](VERIFICATION.md)。
+私有 profile、HAR、账号信息、真实通知和附件不进入仓库。`profile.example.json` 只有空值占位，不能代替登录。

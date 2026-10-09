@@ -1,0 +1,4 @@
+interface:
+  display_name: "迦南通知"
+  short_description: "查询迦南幼稚园通知、下载附件并阅读文本 PDF、扫描件和图片"
+  default_prompt: "使用 $cannan-notice 帮我查阅未查阅和未回复的迦南通知，并查看相关附件。"
